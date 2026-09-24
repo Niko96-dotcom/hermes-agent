@@ -1375,10 +1375,10 @@ def _apply_pulled_update(
         _windows_gateway_resume=_windows_gateway_resume)
     if getattr(_plan, "local_only_branch", None):
         from hermes_cli.update_cmd_git import _restore_local_patch_branch
-        _m()._write_update_incomplete_marker()
         if is_fork and branch == "main":
             _m()._sync_with_upstream_if_needed(
                 git_cmd, _m().PROJECT_ROOT, assume_yes=opts.assume_yes, input_fn=opts.gw_input_fn)
+        _m()._write_update_incomplete_marker()
         _restore_local_patch_branch(git_cmd, branch, _plan.local_only_branch)
         post_pull_sha = _capture_head_sha(git_cmd, _m().PROJECT_ROOT)
         # The fork's target was synced before switching back to the local branch.

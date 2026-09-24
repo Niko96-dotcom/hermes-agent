@@ -161,9 +161,13 @@ def _restore_local_patch_branch(git_cmd, target_branch: str, local_branch: str) 
     aborted = _git_run(git_cmd, ["rebase", "--abort"])
     restored = _git_run(git_cmd, ["rev-parse", "--verify", local_branch])
     state = _git_run(git_cmd, ["status", "--porcelain"])
+    # The pre-swap updater leaves this recovery marker after pulling code.
+    # It is the only untracked file permitted during abort verification.
+    clean_after_abort = all(
+        line == "?? .update-incomplete" for line in state.stdout.splitlines())
     if (aborted.returncode != 0 or restored.returncode != 0
             or restored.stdout.strip() != old_tip or state.returncode != 0
-            or state.stdout.strip()):
+            or not clean_after_abort):
         print(f"✗ Rebase failed and automatic abort could not be verified. Snapshot: {snapshot}")
         print("  Inspect git status and resolve or run git rebase --abort before updating again.")
         sys.exit(1)

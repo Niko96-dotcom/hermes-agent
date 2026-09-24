@@ -346,6 +346,23 @@ def test_local_patch_rebase_conflict_restores_branch_and_snapshot(repo_pair, mon
     assert _git(repo_pair, "status", "--porcelain").stdout == ""
 
 
+def test_update_conflict_recovers_with_incomplete_marker(repo_pair, monkeypatch, capsys):
+    (repo_pair / "a.txt").write_text("local conflict\n")
+    _git(repo_pair, "add", "a.txt")
+    _git(repo_pair, "commit", "-qm", "local conflict")
+    original = _git(repo_pair, "rev-parse", "HEAD").stdout.strip()
+    _patch_update_flow(monkeypatch, repo_pair)
+    with pytest.raises(SystemExit) as exc:
+        hermes_main.cmd_update(SimpleNamespace(branch=None, yes=False, force=False, force_venv=False))
+    assert exc.value.code == 1
+    assert "Updated main is active" in capsys.readouterr().out
+    assert _git(repo_pair, "rev-parse", "old-feature").stdout.strip() == original
+    assert _git(repo_pair, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "main"
+    snapshot = _git(repo_pair, "branch", "--list", "hermes-update-snapshot/*").stdout.strip()
+    assert _git(repo_pair, "rev-parse", snapshot).stdout.strip() == original
+    assert _git(repo_pair, "status", "--porcelain").stdout.strip() == "?? .update-incomplete"
+
+
 def test_local_patch_rebases_onto_selected_target(repo_pair, monkeypatch):
     (repo_pair / "feature.txt").write_text("local\n")
     _git(repo_pair, "add", "feature.txt")

@@ -288,3 +288,14 @@ def test_claimed_destructive_write_with_approval_cannot_bypass_review(setup_memo
     assert result["success"] is False and "provider-specific review" in result["error"]
     assert provider.writes == [] and wa.pending_count("memory") == 0
     assert agent._memory_store.user_entries == []
+
+
+def test_memory_telemetry_names_the_owning_provider(setup_memory, monkeypatch):
+    agent, _ = setup_memory
+    calls = []
+    monkeypatch.setattr(
+        "hermes_cli.observability.shared_metrics_loop.record_builtin_memory_call",
+        lambda action, operations, *, outcome, provider="builtin": calls.append((action, outcome, provider)))
+    call(agent, action="add", target="user", content="Likes jazz")
+    call(agent, action="add", target="memory", content="Use pytest")
+    assert calls == [("add", "success", "external"), ("add", "success", "builtin")]

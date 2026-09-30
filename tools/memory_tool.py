@@ -226,15 +226,31 @@ def memory_tool(action: str = None, target: str = "memory", content: str = None,
     whole matched entry is overwritten; old_text only locates it)."""
     if store is None:
         return tool_error("Memory is not available. It may be disabled in config or this environment.", success=False)
+    outcome, result, owner_name = _memory_tool(action, target, content, old_text, new_text, operations, store,
+                                               provider_manager, provider_metadata)
+    from hermes_cli.observability.shared_metrics_loop import record_builtin_memory_call
+    record_builtin_memory_call(action, operations, outcome=outcome, provider=owner_name or "builtin")
+    return result
+
+
+def _applied(result: Dict[str, Any]) -> Tuple[str, str]:
+    return ("success" if result.get("success") else "failed"), json.dumps(result, ensure_ascii=False)
+
+
+def _memory_tool(action, target, content, old_text, new_text, operations, store,
+                 provider_manager=None, provider_metadata=None) -> Tuple[str, str, Optional[str]]:
+    """``(outcome, result_json, owner)``: ``rejected`` when refused or held before touching the
+    store; ``owner`` names the provider that claimed the write (None for the built-in store)."""
     if content is None and new_text is not None:
         content = new_text
     # Strict providers send JSON null for optional fields; treat as omitted.
     target = "memory" if target is None else target
     target_error = _memory_target_error(store, target)
     if target_error is not None:
-        return json.dumps(target_error)
+        return "rejected", json.dumps(target_error), None
     if operations and not isinstance(operations, list):
-        return tool_error("operations must be a list of {action, content?, old_text?} objects.", success=False)
+        return "rejected", tool_error("operations must be a list of {action, content?, old_text?} objects.",
+                                      success=False), None
     from agent.memory_provider import MemoryWriteIntent
     intent = MemoryWriteIntent(action="batch" if operations else (action or ""), target=target,
                                content=content or "", old_text=old_text or "",
@@ -244,7 +260,8 @@ def memory_tool(action: str = None, target: str = "memory", content: str = None,
         try:
             owner = provider_manager.claim_memory_write(intent)
         except Exception as exc:
-            return tool_error(f"Memory provider ownership check failed: {exc}", success=False)
+            return "rejected", tool_error(f"Memory provider ownership check failed: {exc}", success=False), None
+    owner_name = owner.name if owner else None
     if owner:
         try:
             preflight = getattr(owner, "preflight_memory_write", None)
@@ -252,39 +269,39 @@ def memory_tool(action: str = None, target: str = "memory", content: str = None,
             if refused is not None:
                 if not refused.handled or refused.success:
                     raise RuntimeError("invalid provider preflight result")
-                return json.dumps(refused.to_tool_payload(intent), ensure_ascii=False)
+                return "rejected", json.dumps(refused.to_tool_payload(intent), ensure_ascii=False), owner_name
             pending = {"provider": owner.name, "provider_context": owner.memory_write_replay_context(),
                        "provider_metadata": intent.metadata}
         except Exception as exc:
-            return tool_error(f"Memory provider preflight failed: {exc}", success=False)
+            return "rejected", tool_error(f"Memory provider preflight failed: {exc}", success=False), owner_name
     else:
         pending = None
-    def commit_provider():
-        if owner is None:
-            return None
+
+    def commit_provider() -> Tuple[str, str, Optional[str]]:
         result = provider_manager.handle_claimed_memory_write(owner, intent)
-        return json.dumps(result.to_tool_payload(intent), ensure_ascii=False)
+        return (*_applied(result.to_tool_payload(intent)), owner_name)
+
     if operations:
         denied = _background_delete_gate(store, action, operations, target, provider_pending=pending)
         if denied is not None:
-            return denied
+            return "rejected", denied, owner_name
         # Approval gate: stages (background/gateway) or prompts inline (CLI); off by default.
         gate_result = _apply_write_gate(store, "batch", target, None, None, operations, pending)
         if gate_result is not None:
-            return gate_result
+            return "rejected", gate_result, owner_name
         if owner:
             return commit_provider()
-        return json.dumps(store.apply_batch(target, operations), ensure_ascii=False)
+        return (*_applied(store.apply_batch(target, operations)), None)
     if action not in _STORE_ACTIONS:
-        return tool_error(f"Unknown action '{action}'. Use: add, replace, remove", success=False)
+        return "rejected", tool_error(f"Unknown action '{action}'. Use: add, replace, remove", success=False), None
     invalid = (_validate_single_op(store, action, target, content, old_text)
                or _background_delete_gate(store, action, None, target, content, old_text, pending)
                or _apply_write_gate(store, action, target, content, old_text, provider_pending=pending))
     if invalid is not None:
-        return invalid
+        return "rejected", invalid, owner_name
     if owner:
         return commit_provider()
-    return json.dumps(_STORE_ACTIONS[action][0](store, target, content, old_text), ensure_ascii=False)
+    return (*_applied(_STORE_ACTIONS[action][0](store, target, content, old_text)), None)
 
 
 def get_builtin_memory_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -502,27 +519,3 @@ registry.register(
     check_fn=check_memory_requirements,
     emoji="🧠",
     dynamic_schema_overrides=_build_memory_schema_overrides)
-
-
-# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
-# Names external plugins imported from this module before the Sep 2026 decomposition.
-# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
-# The whole block is removed by reverting the commit that added it.
-from contextlib import contextmanager  # noqa: F401,E402
-import time  # noqa: F401,E402
-
-
-_PLUGIN_COMPAT_LAZY = {
-    'atomic_write_text': ('utils', 'atomic_write_text'),
-}
-
-
-def __getattr__(name):  # PEP 562 — lazy so no import cycles
-    target = _PLUGIN_COMPAT_LAZY.get(name)
-    if target is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    import importlib
-    from hermes_cli.plugin_compat import warn_once
-    warn_once(__name__, name, *target)
-    return getattr(importlib.import_module(target[0]), target[1])
-# ---- END PLUGIN-COMPAT ----
